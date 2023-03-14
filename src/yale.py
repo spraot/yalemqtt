@@ -41,7 +41,7 @@ class GracefulKiller:
 
 class MqttYale():
 
-    config_file = 'config.yml'
+    config_file = 'data/config.yml'
     topic_prefix = 'yale'
     homeassistant_prefix = 'homeassistant'
     mqtt_server_ip = 'localhost'
@@ -91,7 +91,7 @@ class MqttYale():
             except KeyError:
                 pass
 
-        self.yale.setdefault('access_token_cache_file', 'access_cache.json')
+        self.yale.setdefault('access_token_cache_file', 'data/access_cache.json')
         self.yale.setdefault('login_method', 'email')
 
         self.availability_topic = self.topic_prefix + '/bridge/state'
@@ -135,10 +135,7 @@ class MqttYale():
             # skipping
             return
         
-        # Wait for your code and pass it in to validate_verification_code()
         validation_result = self.yale_authenticator.validate_verification_code(code)
-        # If ValidationResult is INVALID_VERIFICATION_CODE, then you'll need to either enter correct one or resend by calling send_verification_code() again
-        # If ValidationResult is VALIDATED, then you'll need to call authenticate() again to finish authentication process
         if validation_result == ValidationResult.VALIDATED:
             logging.info('Code validation successful')
             self.yale_authentication = self.yale_authenticator.authenticate()

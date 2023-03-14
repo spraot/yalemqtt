@@ -6,6 +6,6 @@ services:
     restart: unless-stopped
     network_mode: host
     volumes:
-      - ./config.yml:/config.yml
+      - ./data:/data
 #    environment:
 #      - LOGLEVEL=DEBUG
