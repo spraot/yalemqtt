@@ -1,0 +1,10 @@
+topic_prefix: pi/io
+mqtt_server_ip: localhost
+mqtt_server_port: 1883
+mqtt_server_user: mqtt
+mqtt_server_password: 123abc
+
+yale:
+  login_method: email
+  username: me@example.dk
+  password: password

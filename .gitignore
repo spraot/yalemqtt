@@ -1,0 +1,5 @@
+.venv
+config.yml
+*.pyc
+.DS_Store
+access_cache.json
