@@ -3,3 +3,4 @@ config.yml
 *.pyc
 .DS_Store
 access_cache.json
+database.json

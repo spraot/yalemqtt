@@ -3,7 +3,6 @@
 import os
 import re
 import sys
-import datetime
 import json
 import yaml
 from statistics import mean
@@ -11,7 +10,6 @@ from threading import Event
 import paho.mqtt.client as mqtt
 import time
 import signal
-import threading
 import logging
 import atexit
 from yalexs.api import Api 
@@ -41,6 +39,7 @@ class GracefulKiller:
 
 class MqttYale():
 
+    data_dir = 'data'
     config_file = 'data/config.yml'
     topic_prefix = 'yale'
     homeassistant_prefix = 'homeassistant'
@@ -79,19 +78,40 @@ class MqttYale():
 
         logging.info('init done')
 
+    def get_lock_db(self):
+        try:
+            with open(self.database_file, 'r') as f:
+                lock_db = json.load(f)
+        except Exception as e:
+            if not isinstance(e, FileNotFoundError):
+                logging.error('Could not read database file due to error: '+str(e))
+            lock_db = {'locks': []}
+        return lock_db
+    
+    def save_lock_db(self):
+        lock_db = {
+            'locks': [{
+                'name': lock['name'],
+                'mqtt_config_topic': lock['mqtt_config_topic']
+            } for lock in self.locks]
+        }
+        with open(self.database_file, 'w') as f:
+            json.dump(lock_db, f)
+
     def load_config(self):
         logging.info('Reading config from '+self.config_file)
 
         with open(self.config_file, 'r') as f:
             config = yaml.safe_load(f)
 
-        for key in ['topic_prefix', 'homeassistant_prefix', 'mqtt_server_ip', 'mqtt_server_port', 'mqtt_server_user', 'mqtt_server_password', 'yale']:
+        for key in ['topic_prefix', 'homeassistant_prefix', 'mqtt_server_ip', 'mqtt_server_port', 'mqtt_server_user', 'mqtt_server_password', 'yale', 'data_dir', 'database_file']:
             try:
                 self.__setattr__(key, config[key])
             except KeyError:
-                pass
+                if key == 'database_file':
+                    self.database_file = os.path.join(self.data_dir, 'database.json')
 
-        self.yale.setdefault('access_token_cache_file', 'data/access_cache.json')
+        self.yale.setdefault('access_token_cache_file', os.path.join(self.data_dir, 'access_cache.json'))
         self.yale.setdefault('login_method', 'email')
 
         self.availability_topic = self.topic_prefix + '/bridge/state'
@@ -187,6 +207,13 @@ class MqttYale():
 
             #Subsribe to MQTT lock updates
             self.mqttclient.subscribe(lock['mqtt_set_state_topic'], 1)
+
+        mqtt_config_topics = [lock['mqtt_config_topic'] for lock in self.locks]
+        for lock in self.get_lock_db()['locks']:
+            if lock['mqtt_config_topic'] not in mqtt_config_topics:
+                self.remove_mqtt_config_for_lock(lock)
+                self.mqttclient.publish(lock['mqtt_config_topic'], '', 1, True)
+        self.save_lock_db()
 
     def api_subscribe(self):
         """Subscribe to pubnub messages."""
@@ -296,7 +323,6 @@ class MqttYale():
         self.mqttclient.publish(self.availability_topic, payload='{"state": "offline"}', qos=1, retain=True)
         for lock in self.locks:
             self.mqtt_broadcast_lock_availability(lock, '')
-            self.remove_mqtt_config_for_lock(lock)
 
         self.api_unsubscribe()
 
