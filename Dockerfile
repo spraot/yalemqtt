@@ -14,6 +14,6 @@ COPY requirements.txt ./
 RUN pip install -r requirements.txt
 
 COPY src/* ./
-RUN MKDIR data
+RUN mkdir data
 
 CMD [ "python", "yale.py", "data/config.yml" ]
