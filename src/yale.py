@@ -122,13 +122,11 @@ class MqttYale():
 
         logging.info('Authentication state: '+self.yale_authentication.state.value)
 
-        # State can be either REQUIRES_VALIDATION, BAD_PASSWORD or AUTHENTICATED
-        # You'll need to call different methods to finish authentication process, see below
         if self.yale_authentication.state == AuthenticationState.REQUIRES_VALIDATION:
             self.yale_authenticator.send_verification_code()
-            logging.warn('Validation needed to log in, waiting for code at '+self.api_code_topic)
+            logging.warning('Validation needed to log in, waiting for code at '+self.api_code_topic)
         elif self.yale_authentication.state == AuthenticationState.BAD_PASSWORD:
-            logging.warn('Authentication failed: invalid credentials')
+            logging.warning('Authentication failed: invalid credentials')
 
         self.update_api_state()
 
@@ -144,9 +142,6 @@ class MqttYale():
         if validation_result == ValidationResult.VALIDATED:
             logging.info('Code validation successful')
             self.yale_authentication = self.yale_authenticator.authenticate()
-
-            if self.yale_authentication != AuthenticationState.AUTHENTICATED:
-                logging.error('Not authenticated for unknown reason')
         else:
             logging.error('Code validation unsuccessful, try new code or restart service to start over')
 
