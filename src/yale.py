@@ -51,7 +51,7 @@ class MqttYale():
     update_freq = 5
 
     mqtt_topic_map = {}
-    locks = {}
+    locks = []
     _lock_by_id = {}
 
     _api_unsub_func1 = None
@@ -338,6 +338,10 @@ class MqttYale():
 
         self.mqttclient.subscribe(self.api_code_topic, 1)
 
+        for lock in self.locks:
+            #Subsribe to MQTT lock updates
+            self.mqttclient.subscribe(lock['mqtt_set_state_topic'], 1)
+
         self.yale_authenticate()
 
     def mqtt_on_message(self, client, userdata, msg):
@@ -348,7 +352,10 @@ class MqttYale():
             if str(msg.topic) == self.api_code_topic:
                 self.apply_validation_code(int(payload_as_string))
             else:
-                self.set_lock_state(self.mqtt_topic_map[str(msg.topic)], payload_as_string)
+                try:
+                    self.set_lock_state(self.mqtt_topic_map[str(msg.topic)], payload_as_string)
+                except KeyError:
+                    logging.error('Unknown command topic: '+msg.topic)
 
         except Exception as e:
             logging.exception(f'Encountered error when processing {msg.topic} with payload "{payload_as_string}": '+str(e))
