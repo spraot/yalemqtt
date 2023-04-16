@@ -61,7 +61,7 @@ class AugustPubNub(SubscribeCallback):
         # Handle new messages
         device_id = self._device_channels[message.channel]
         _LOGGER.debug(
-            "Recieved new messages on channel %s for device_id: %s with timetoken: %s: %s",
+            "Received new messages on channel %s for device_id: %s with timetoken: %s: %s",
             message.channel,
             device_id,
             message.timetoken,

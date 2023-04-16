@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+from datetime import datetime
 import os
 import re
 import sys
@@ -12,10 +13,12 @@ import time
 import signal
 import logging
 import atexit
+from yalexs.activity import ActivityType
 from yalexs.api import Api 
 from yalexs.authenticator import Authenticator, AuthenticationState
 from yalexs.authenticator_common import ValidationResult
 from yalexs.exceptions import AugustApiHTTPError
+from activity import ActivityStream
 from pubnub_async import AugustPubNub, async_create_pubnub
 from yalexs.pubnub_activity import activities_from_pubnub_message
 
@@ -183,6 +186,7 @@ class MqttYale():
                 'mqtt_config_topic': '{}/lock/{}/config'.format(self.homeassistant_prefix, id),
                 'mqtt_set_state_topic': '{}/{}/set'.format(self.topic_prefix, id),
                 'mqtt_state_topic': '{}/{}'.format(self.topic_prefix, id),
+                'mqtt_activity_topic': '{}/{}/activity'.format(self.topic_prefix, id),
                 'mqtt_availability_topic': '{}/{}/availability'.format(self.topic_prefix, id),
                 'details': self.yale_api.get_lock_detail(self.yale_authentication.access_token, lock.device_id)
             })
@@ -215,6 +219,8 @@ class MqttYale():
                 self.mqttclient.publish(lock['mqtt_config_topic'], '', 1, True)
         self.save_lock_db()
 
+        self._activity_log = ActivityStream(self.yale_api, self.yale_authentication, self.locks[0]['house_id'], self.on_new_activity, last_update_time=datetime.now())
+
     def api_subscribe(self):
         """Subscribe to pubnub messages."""
         self.api_unsubscribe()
@@ -232,9 +238,25 @@ class MqttYale():
         lock = self._lock_by_id[device_id]
         activities = activities_from_pubnub_message(lock['details'], date_time, message)
         for act in activities:
-            logging.info(f'Lock event: {repr(act)}')
-        
+            logging.debug(f'Lock event: {repr(act)}')
+        self._activity_log._update_activities()
         self.update_lock_state(lock)
+
+    def on_new_activity(self, activity):
+        """Process a new activity."""
+        logging.info(f'New activity: {repr(activity)}')
+
+        lock = self._lock_by_id[activity.device_id]
+
+        payload = {
+            'action': activity.action,
+            'time': activity.activity_start_time.isoformat()
+        }
+
+        if activity.activity_type == ActivityType.LOCK_OPERATION:
+            payload['operated_by'] = activity.operated_by
+
+        self.mqttclient.publish(lock['mqtt_activity_topic'], json.dumps(payload), 1)   
 
     def api_unsubscribe(self):
         """Stop the subscriptions."""
