@@ -5,10 +5,6 @@ from aiohttp import ClientError
 
 from debounce import debounce
 
-from yalexs import activity
-
-activity.ACTIVITY_ACTIONS_DOORBELL_DING = {"lock_accessory_motion_detect"}
-
 _LOGGER = logging.getLogger(__name__)
 
 ACTIVITY_STREAM_FETCH_LIMIT = 20
