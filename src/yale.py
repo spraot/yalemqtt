@@ -1,8 +1,5 @@
 #!/usr/bin/env python3
 
-from yalexs import activity
-activity.ACTIVITY_ACTIONS_DOORBELL_DING = {"lock_accessory_motion_detect"}
-
 from datetime import datetime
 import os
 import re
