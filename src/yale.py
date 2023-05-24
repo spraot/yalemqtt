@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 
+from asyncio import sleep
+import asyncio
 from datetime import datetime
 import os
 import re
@@ -7,12 +9,10 @@ import sys
 import json
 import yaml
 from statistics import mean
-from threading import Event
 import paho.mqtt.client as mqtt
-import time
 import signal
 import logging
-import atexit
+from threading import Event
 from yalexs.activity import ActivityType
 from yalexs.api import Api 
 from yalexs.authenticator import Authenticator, AuthenticationState
@@ -76,9 +76,6 @@ class MqttYale():
         self.mqttclient = mqtt.Client()
         self.mqttclient.on_connect = self.mqtt_on_connect
         self.mqttclient.on_message = self.mqtt_on_message
-
-         #Register program end event
-        atexit.register(self.programend)
 
         logging.info('init done')
 
@@ -304,7 +301,7 @@ class MqttYale():
         logging.debug('Removing homeassistant configuration for lock ' + lock['name'])
         self.mqttclient.publish(lock['mqtt_config_topic'], payload='', qos=1, retain=True)
 
-    def start(self):
+    async def start(self):
         logging.info('starting')
 
         #MQTT startup
@@ -315,14 +312,10 @@ class MqttYale():
         logging.info('MQTT client started')
 
         logging.info('Starting main thread')
-        # self.main_thread = threading.Thread(name='main', target=self.main)
-        # self.main_thread.start()
 
-        self.main()
+        await self.main()
 
-        # logging.info('started')
-
-    def main(self):
+    async def main(self):
         logging.debug('main')
         while not self.killer.kill_now.is_set():
             try:
@@ -335,12 +328,10 @@ class MqttYale():
                 pass
             self.killer.kill_now.wait(1)
 
-        # self.api_unsubscribe()
         logging.debug('Shutting down now')
-        self.programend()
-        os._exit(0)
+        await self.programend()
 
-    def programend(self):
+    async def programend(self):
         logging.info('stopping')
 
         self.mqttclient.publish(self.availability_topic, payload='{"state": "offline"}', qos=1, retain=True)
@@ -349,9 +340,11 @@ class MqttYale():
 
         self.api_unsubscribe()
 
-        time.sleep(0.5)
+        await sleep(0.5)
         self.mqttclient.disconnect()
         logging.info('stopped')
+
+        os._exit(0)
 
     def mqtt_on_connect(self, client, userdata, flags, rc):
         logging.info('MQTT client connected with result code '+str(rc))
@@ -428,5 +421,7 @@ class MqttYale():
         self.mqttclient.publish(topic, payload=state, qos=1, retain=True)
 
 if __name__ == '__main__':
+    loop = asyncio.get_event_loop()
+
     mqttYale =  MqttYale()
-    mqttYale.start()
+    loop.run_until_complete(mqttYale.start())
