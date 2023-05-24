@@ -8,20 +8,20 @@ from pubnub.enums import PNReconnectionPolicy, PNStatusCategory
 from pubnub.pnconfiguration import PNConfiguration
 from pubnub.pubnub import PubNub
 
-AUGUST_CHANNEL = "sub-c-1030e062-0ebe-11e5-a5c2-0619f8945a4f"
+from yalexs.const import PUBNUB_TOKENS, Brand
 
 _LOGGER = logging.getLogger(__name__)
 
-
 class AugustPubNub(SubscribeCallback):
     def __init__(self, *args, **kwargs):
+        """Initialize the AugustPubNub."""
         super().__init__(*args, **kwargs)
         self.connected = False
         self._device_channels = {}
         self._subscriptions = []
 
     def presence(self, pubnub, presence):
-        _LOGGER.debug("Recieved new presence: %s", presence)
+        _LOGGER.debug("Received new presence: %s", presence)
 
     def status(self, pubnub, status):
         if not pubnub:
@@ -29,7 +29,7 @@ class AugustPubNub(SubscribeCallback):
             return
 
         _LOGGER.debug(
-            "Recieved new status: category=%s error_data=%s error=%s status_code=%s operation=%s",
+            "Received new status: category=%s error_data=%s error=%s status_code=%s operation=%s",
             status.category,
             status.error_data,
             status.error,
@@ -89,7 +89,7 @@ class AugustPubNub(SubscribeCallback):
         return _unsubscribe
 
     def register_device(self, device_detail):
-        """Regiter a device to get updates."""
+        """Register a device to get updates."""
         if device_detail.pubsub_channel is None:
             return
         self._device_channels[device_detail.pubsub_channel] = device_detail.device_id
@@ -100,10 +100,12 @@ class AugustPubNub(SubscribeCallback):
         return self._device_channels.keys()
 
 
-def async_create_pubnub(user_uuid, subscriptions):
+def async_create_pubnub(user_uuid, subscriptions, brand=Brand.AUGUST):
     """Create a pubnub subscription."""
+    tokens = PUBNUB_TOKENS[brand]
     pnconfig = PNConfiguration()
-    pnconfig.subscribe_key = AUGUST_CHANNEL
+    pnconfig.subscribe_key = tokens["subscribe"]
+    pnconfig.publish_key = tokens["publish"]
     pnconfig.uuid = f"pn-{str(user_uuid).upper()}"
     pnconfig.reconnect_policy = PNReconnectionPolicy.EXPONENTIAL
     pubnub = PubNub(pnconfig)

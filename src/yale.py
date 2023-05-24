@@ -231,7 +231,7 @@ class MqttYale():
             logging.debug('registering lock '+lock['details'].pubsub_channel)
             pubnub.register_device(lock['details'])
         self._api_unsub_func1 = pubnub.subscribe(self.on_api_message)
-        self._api_unsub_func2 = async_create_pubnub(self.api_user['UserID'], pubnub)
+        self._api_unsub_func2 = async_create_pubnub(self.api_user['UserID'], pubnub, Brand.YALE_HOME)
 
     def on_api_message(self, device_id, date_time, message):
         """Process a pubnub message."""
