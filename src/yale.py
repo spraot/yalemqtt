@@ -21,6 +21,7 @@ from yalexs.exceptions import AugustApiHTTPError
 from activity import ActivityStream
 from pubnub_async import AugustPubNub, async_create_pubnub
 from yalexs.pubnub_activity import activities_from_pubnub_message
+from yalexs.const import Brand
 
 CMD_LOCK = 'LOCK'
 CMD_UNLOCK = 'UNLOCK'
@@ -139,7 +140,7 @@ class MqttYale():
         if 'username' in self.yale and 'password' in self.yale:
             logging.debug('API credentials found')
 
-        self.yale_api = Api(timeout=20)
+        self.yale_api = Api(timeout=20, brand=Brand.YALE_HOME)
         self.yale_authenticator = Authenticator(self.yale_api, **self.yale)
         self.yale_authentication = self.yale_authenticator.authenticate()
 
