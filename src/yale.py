@@ -183,15 +183,18 @@ class MqttYale():
                 'house_id': lock.house_id,
                 'mqtt_config_topic': '{}/lock/{}/config'.format(self.homeassistant_prefix, id),
                 'mqtt_set_state_topic': '{}/{}/set'.format(self.topic_prefix, id),
+                'mqtt_get_state_topic': '{}/{}/get'.format(self.topic_prefix, id),
                 'mqtt_state_topic': '{}/{}'.format(self.topic_prefix, id),
                 'mqtt_activity_topic': '{}/{}/activity'.format(self.topic_prefix, id),
                 'mqtt_availability_topic': '{}/{}/availability'.format(self.topic_prefix, id),
-                'details': self.yale_api.get_lock_detail(self.yale_authentication.access_token, lock.device_id)
+                'details': self.yale_api.get_lock_detail(self.yale_authentication.access_token, lock.device_id),
+                'last_status': ''
             })
 
         self._lock_by_id = {l['device_id']: l for l in self.locks}
 
         self.mqtt_topic_map = {l['mqtt_set_state_topic']: l for l in self.locks}
+        self.mqtt_topic_map.update({l['mqtt_get_state_topic']: l for l in self.locks})
 
         lock_ids = (l['id'] for l in self.locks)
         for lock in old_locks:
@@ -207,8 +210,9 @@ class MqttYale():
             self.mqtt_broadcast_lock_availability(lock, '{"state": "online"}')
             self.update_lock_state(lock)
 
-            #Subsribe to MQTT lock updates
+            #Subscribe to MQTT lock updates
             self.mqttclient.subscribe(lock['mqtt_set_state_topic'], 1)
+            self.mqttclient.subscribe(lock['mqtt_get_state_topic'], 1)
 
         mqtt_config_topics = [lock['mqtt_config_topic'] for lock in self.locks]
         for lock in self.get_lock_db()['locks']:
@@ -355,8 +359,9 @@ class MqttYale():
         self.mqttclient.subscribe(self.api_code_topic, 1)
 
         for lock in self.locks:
-            #Subsribe to MQTT lock updates
+            #Subscribe to MQTT lock updates
             self.mqttclient.subscribe(lock['mqtt_set_state_topic'], 1)
+            self.mqttclient.subscribe(lock['mqtt_get_state_topic'], 1)
 
         self.yale_authenticate()
 
@@ -369,7 +374,11 @@ class MqttYale():
                 self.apply_validation_code(int(payload_as_string))
             else:
                 try:
-                    self.set_lock_state(self.mqtt_topic_map[str(msg.topic)], payload_as_string)
+                    lock = self.mqtt_topic_map[str(msg.topic)]
+                    if msg.topic.endswith('/get'):
+                        self.update_lock_state(lock)
+                    else:
+                        self.set_lock_state(self.mqtt_topic_map[str(msg.topic)], payload_as_string)
                 except KeyError:
                     logging.error('Unknown command topic: '+msg.topic)
 
@@ -408,7 +417,9 @@ class MqttYale():
             'doorState': state[1].value.upper()
         })
 
-        self.mqttclient.publish(lock['mqtt_state_topic'], payload, 1)        
+        if lock['last_status'] != payload:
+            lock['last_status'] = payload
+            self.mqttclient.publish(lock['mqtt_state_topic'], payload, 1)        
 
     def mqtt_broadcast_lock_availability(self, lock, value):
        logging.debug('Broadcasting MQTT message on topic: ' + lock['mqtt_availability_topic'] + ', value: ' + value)
