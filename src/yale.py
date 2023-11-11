@@ -378,7 +378,7 @@ class MqttYale():
                     if msg.topic.endswith('/get'):
                         self.update_lock_state(lock)
                     else:
-                        self.set_lock_state(self.mqtt_topic_map[str(msg.topic)], payload_as_string)
+                        self.set_lock_state(lock, payload_as_string)
                 except KeyError:
                     logging.error('Unknown command topic: '+msg.topic)
 
