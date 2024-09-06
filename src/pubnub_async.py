@@ -8,7 +8,7 @@ from pubnub.enums import PNReconnectionPolicy, PNStatusCategory
 from pubnub.pnconfiguration import PNConfiguration
 from pubnub.pubnub import PubNub
 
-from yalexs.const import PUBNUB_TOKENS, Brand
+from yalexs.const import BRAND_CONFIG, Brand
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -102,10 +102,10 @@ class AugustPubNub(SubscribeCallback):
 
 def async_create_pubnub(user_uuid, subscriptions, brand=Brand.AUGUST):
     """Create a pubnub subscription."""
-    tokens = PUBNUB_TOKENS[brand]
+    brandConfig = BRAND_CONFIG[brand]
     pnconfig = PNConfiguration()
-    pnconfig.subscribe_key = tokens["subscribe"]
-    pnconfig.publish_key = tokens["publish"]
+    pnconfig.subscribe_key = brandConfig.pubnub_subscribe_token
+    pnconfig.publish_key = brandConfig.pubnub_publish_token
     pnconfig.uuid = f"pn-{str(user_uuid).upper()}"
     pnconfig.reconnect_policy = PNReconnectionPolicy.EXPONENTIAL
     pubnub = PubNub(pnconfig)

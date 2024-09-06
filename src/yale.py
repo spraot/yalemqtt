@@ -5,19 +5,19 @@ import os
 import re
 import sys
 import json
+import asyncio
+from aiohttp import ClientSession
+import aiohttp
 import yaml
-from statistics import mean
-from threading import Event
-import paho.mqtt.client as mqtt
+from aiomqtt import Client as MqttClient, Will
 import time
-import signal
+from signal import signal, SIGINT, SIGTERM
 import logging
-import atexit
 from yalexs.activity import ActivityType
-from yalexs.api import Api 
-from yalexs.authenticator import Authenticator, AuthenticationState
+from yalexs.api_async import ApiAsync as Api
+from yalexs.authenticator_async import AuthenticatorAsync as Authenticator, AuthenticationState
 from yalexs.authenticator_common import ValidationResult
-from yalexs.exceptions import AugustApiHTTPError
+from yalexs.exceptions import AugustApiAIOHTTPError as AugustApiHTTPError
 from activity import ActivityStream
 from pubnub_async import AugustPubNub, async_create_pubnub
 from yalexs.pubnub_activity import activities_from_pubnub_message
@@ -34,9 +34,9 @@ STATE_UNLOCKING = 'UNLOCKING'
 
 class GracefulKiller:
   def __init__(self):
-    self.kill_now = Event()
-    signal.signal(signal.SIGINT, self.exit_gracefully)
-    signal.signal(signal.SIGTERM, self.exit_gracefully)
+    self.kill_now = asyncio.Event()
+    # signal(SIGINT, self.exit_gracefully)
+    # signal(SIGTERM, self.exit_gracefully)
 
   def exit_gracefully(self, *args):
     self.kill_now.set()
@@ -51,8 +51,6 @@ class MqttYale():
     mqtt_server_port = 1883
     mqtt_server_user = ''
     mqtt_server_password = ''
-    pump_topic = ''
-    update_freq = 5
 
     mqtt_topic_map = {}
     locks = []
@@ -60,6 +58,8 @@ class MqttYale():
 
     _api_unsub_func1 = None
     _api_unsub_func2 = None
+
+    http_session = None
 
     def __init__(self):
         logging.basicConfig(level=os.environ.get('LOGLEVEL', 'INFO'), format='%(asctime)s;<%(levelname)s>;%(message)s')
@@ -72,15 +72,14 @@ class MqttYale():
 
         self.load_config()
 
-        #MQTT init
-        self.mqttclient = mqtt.Client()
-        self.mqttclient.on_connect = self.mqtt_on_connect
-        self.mqttclient.on_message = self.mqtt_on_message
-
          #Register program end event
-        atexit.register(self.programend)
+        # atexit.register(self.programend)
 
         logging.info('init done')
+
+    async def init_aiohttp_client(self):
+        async with aiohttp.ClientSession() as session:
+            pass
 
     def get_lock_db(self):
         try:
@@ -122,13 +121,20 @@ class MqttYale():
         self.api_state_topic = self.topic_prefix + '/bridge/api'
         self.api_code_topic = self.api_state_topic + '/code'
 
-    def update_api_state(self):
-        self.mqttclient.publish(self.api_state_topic, payload=json.dumps({'state': self.yale_authentication.state.value}), qos=1, retain=True)
+    async def update_api_state(self):
+        state = {'state': self.yale_authentication.state.value}
+
+        if self.yale_authentication.state == AuthenticationState.REQUIRES_VALIDATION:
+            state['validation_code_topic'] = self.api_code_topic
+
+        await self.mqttclient.publish(self.api_state_topic, payload=json.dumps(state), qos=1, retain=True)
 
         if self.yale_authentication.state == AuthenticationState.AUTHENTICATED:
-            self.get_locks()
+            await self.get_locks()
 
-    def yale_authenticate(self):
+    async def yale_authenticate(self):
+        if not self.http_session:
+            self.http_session = ClientSession()
         try:
             if self.yale_authentication.state == AuthenticationState.AUTHENTICATED:
                 return
@@ -140,37 +146,38 @@ class MqttYale():
         if 'username' in self.yale and 'password' in self.yale:
             logging.debug('API credentials found')
 
-        self.yale_api = Api(timeout=20, brand=Brand.YALE_HOME)
+        self.yale_api = Api(timeout=20, brand=Brand.YALE_HOME, aiohttp_session=self.http_session)
         self.yale_authenticator = Authenticator(self.yale_api, **self.yale)
-        self.yale_authentication = self.yale_authenticator.authenticate()
+        await self.yale_authenticator.async_setup_authentication()
+        self.yale_authentication = await self.yale_authenticator.async_authenticate()
 
         logging.info('Authentication state: '+self.yale_authentication.state.value)
 
         if self.yale_authentication.state == AuthenticationState.REQUIRES_VALIDATION:
-            self.yale_authenticator.send_verification_code()
+            await self.yale_authenticator.async_send_verification_code()
             logging.warning('Validation needed to log in, waiting for code at '+self.api_code_topic)
         elif self.yale_authentication.state == AuthenticationState.BAD_PASSWORD:
             logging.warning('Authentication failed: invalid credentials')
 
-        self.update_api_state()
+        await self.update_api_state()
 
-    def apply_validation_code(self, code):
+    async def apply_validation_code(self, code):
         if self.yale_authentication == AuthenticationState.AUTHENTICATED:
             # skipping
             return
         
-        validation_result = self.yale_authenticator.validate_verification_code(code)
+        validation_result = await self.yale_authenticator.async_validate_verification_code(code)
         if validation_result == ValidationResult.VALIDATED:
             logging.info('Code validation successful')
-            self.yale_authentication = self.yale_authenticator.authenticate()
+            self.yale_authentication = await self.yale_authenticator.async_authenticate()
         else:
             logging.error('Code validation unsuccessful, try new code or restart service to start over')
 
-        self.update_api_state()
+        await self.update_api_state()
 
-    def get_locks(self):
-        self.api_user = self.yale_api.get_user(self.yale_authentication.access_token)
-        locks = self.yale_api.get_locks(self.yale_authentication.access_token)
+    async def get_locks(self):
+        self.api_user = await self.yale_api.async_get_user(self.yale_authentication.access_token)
+        locks = await self.yale_api.async_get_locks(self.yale_authentication.access_token)
         logging.info(f'Found {len(locks)} locks')
 
         old_locks = self.locks
@@ -190,7 +197,7 @@ class MqttYale():
                 'mqtt_state_topic': '{}/{}'.format(self.topic_prefix, id),
                 'mqtt_activity_topic': '{}/{}/activity'.format(self.topic_prefix, id),
                 'mqtt_availability_topic': '{}/{}/availability'.format(self.topic_prefix, id),
-                'details': self.yale_api.get_lock_detail(self.yale_authentication.access_token, lock.device_id),
+                'details': await self.yale_api.async_get_lock_detail(self.yale_authentication.access_token, lock.device_id),
                 'last_status': ''
             })
 
@@ -202,33 +209,33 @@ class MqttYale():
         lock_ids = (l['id'] for l in self.locks)
         for lock in old_locks:
             if lock['id'] not in lock_ids:
-                self.mqtt_broadcast_lock_availability(lock, '')
-                self.mqttclient.unsubscribe(lock['mqtt_set_state_topic'])
+                await self.mqtt_broadcast_lock_availability(lock, '')
+                await self.mqttclient.unsubscribe(lock['mqtt_set_state_topic'])
 
         for lock in self.locks:
             #Configure MQTT for locks
-            self.configure_mqtt_for_lock(lock)
+            await self.configure_mqtt_for_lock(lock)
 
             #Broadcast current lock state to MQTT for locks
-            self.mqtt_broadcast_lock_availability(lock, '{"state": "online"}')
-            self.update_lock_state(lock)
+            await self.mqtt_broadcast_lock_availability(lock, '{"state": "online"}')
+            await self.update_lock_state(lock)
 
             #Subscribe to MQTT lock updates
-            self.mqttclient.subscribe(lock['mqtt_set_state_topic'], 1)
-            self.mqttclient.subscribe(lock['mqtt_get_state_topic'], 1)
+            await self.mqttclient.subscribe(lock['mqtt_set_state_topic'], 1)
+            await self.mqttclient.subscribe('test', 1)
 
         mqtt_config_topics = [lock['mqtt_config_topic'] for lock in self.locks]
         for lock in self.get_lock_db()['locks']:
             if lock['mqtt_config_topic'] not in mqtt_config_topics:
-                self.remove_mqtt_config_for_lock(lock)
-                self.mqttclient.publish(lock['mqtt_config_topic'], '', 1, True)
+                await self.remove_mqtt_config_for_lock(lock)
+                await self.mqttclient.publish(lock['mqtt_config_topic'], '', 1, True)
         self.save_lock_db()
 
         self._activity_log = ActivityStream(self.yale_api, self.yale_authentication, self.locks[0]['house_id'], self.on_new_activity, last_update_time=datetime.now())
 
-    def api_subscribe(self):
+    async def api_subscribe(self):
         """Subscribe to pubnub messages."""
-        self.api_unsubscribe()
+        await self.api_unsubscribe()
         logging.info('Subscribing to lock events')
         pubnub = AugustPubNub()
         for lock in self.locks:
@@ -237,17 +244,19 @@ class MqttYale():
         self._api_unsub_func1 = pubnub.subscribe(self.on_api_message)
         self._api_unsub_func2 = async_create_pubnub(self.api_user['UserID'], pubnub, Brand.YALE_HOME)
 
-    def on_api_message(self, device_id, date_time, message):
+    async def on_api_message(self, device_id, date_time, message):
         """Process a pubnub message."""
         logging.debug('Received lock events')
         lock = self._lock_by_id[device_id]
         activities = activities_from_pubnub_message(lock['details'], date_time, message)
         for act in activities:
             logging.debug(f'Lock event: {repr(act)}')
-        self._activity_log._update_activities()
-        self.update_lock_state(lock)
+        self._activity_log._refresh()
+        if self._activity_log.invalid_api_token:
+            self.killer.exit_gracefully()
+        await self.update_lock_state(lock)
 
-    def on_new_activity(self, activity):
+    async def on_new_activity(self, activity):
         """Process a new activity."""
         logging.info(f'New activity: {repr(activity)}')
 
@@ -261,9 +270,9 @@ class MqttYale():
         if activity.activity_type == ActivityType.LOCK_OPERATION:
             payload['operated_by'] = activity.operated_by
 
-        self.mqttclient.publish(lock['mqtt_activity_topic'], json.dumps(payload), 1)   
+        await self.mqttclient.publish(lock['mqtt_activity_topic'], json.dumps(payload), 1)   
 
-    def api_unsubscribe(self):
+    async def api_unsubscribe(self):
         """Stop the subscriptions."""
 
         if self._api_unsub_func1:
@@ -278,7 +287,7 @@ class MqttYale():
 
         logging.debug('Done unsubscribing')
 
-    def configure_mqtt_for_lock(self, lock):
+    async def configure_mqtt_for_lock(self, lock):
         lock_configuration = {
             'name': lock['name'],
             "availability": [
@@ -302,103 +311,119 @@ class MqttYale():
 
         json_conf = json.dumps(lock_configuration)
         logging.debug('Broadcasting homeassistant configuration for lock ' + lock['name'] + ': ' + json_conf)
-        self.mqttclient.publish(lock['mqtt_config_topic'], payload=json_conf, qos=1, retain=True)
+        await self.mqttclient.publish(lock['mqtt_config_topic'], payload=json_conf, qos=1, retain=True)
 
-    def remove_mqtt_config_for_lock(self, lock):
+    async def remove_mqtt_config_for_lock(self, lock):
         logging.debug('Removing homeassistant configuration for lock ' + lock['name'])
-        self.mqttclient.publish(lock['mqtt_config_topic'], payload='', qos=1, retain=True)
+        await self.mqttclient.publish(lock['mqtt_config_topic'], payload='', qos=1, retain=True)
 
     def start(self):
         logging.info('starting')
+        asyncio.run(self.main())
 
-        #MQTT startup
-        logging.info('Starting MQTT client')
-        self.mqttclient.username_pw_set(self.mqtt_server_user, password=self.mqtt_server_password)
-        self.mqttclient.connect(self.mqtt_server_ip, self.mqtt_server_port, 60)
-        self.mqttclient.loop_start()
-        logging.info('MQTT client started')
-
-        logging.info('Starting main thread')
-        # self.main_thread = threading.Thread(name='main', target=self.main)
-        # self.main_thread.start()
-
-        self.main()
-
-        # logging.info('started')
-
-    def main(self):
-        logging.debug('main')
+    async def mainloop(self):
+        logging.debug('mainloop')
         while not self.killer.kill_now.is_set():
             try:
                 if self.yale_authentication.state == AuthenticationState.AUTHENTICATED and not self._api_unsub_func1:
-                    # self.subscribe_thread = threading.Thread(name='api', target=self.api_subscribe)
-                    # self.subscribe_thread.start()
-                    # asyncio.set_event_loop(asyncio.new_event_loop())
-                    self.api_subscribe()
+                    await self.api_subscribe()
             except AttributeError:
                 pass
-            self.killer.kill_now.wait(1)
 
-        # self.api_unsubscribe()
-        logging.debug('Shutting down now')
-        self.programend()
+            try:
+                await asyncio.wait_for(self.killer.kill_now.wait(), timeout=1)
+            except asyncio.TimeoutError:
+                pass
+            # self.killer.kill_now.wait(1)
+        raise asyncio.CancelledError()
+
+    async def main(self):
+        logging.debug('main')
+
+        #MQTT startup
+        logging.info('Starting MQTT client')
+        async with MqttClient(self.mqtt_server_ip, self.mqtt_server_port, username=self.mqtt_server_user, password=self.mqtt_server_password,
+                                     will=Will(self.availability_topic, payload='{"state": "offline"}', qos=1, retain=True)) as c:
+            self.mqttclient = c
+            logging.info('MQTT client started')
+            
+            await self.mqtt_on_connect()
+
+            async with asyncio.TaskGroup() as tg:
+                main_loop = tg.create_task(self.mainloop())
+                mqtt_listener = tg.create_task(self.mqtt_listen())
+
+                for sig in [SIGINT, SIGTERM]:
+                    asyncio.get_event_loop().add_signal_handler(sig, tg._abort)
+
+                logging.debug('Waiting for event loops to finish')
+                try:
+                    await asyncio.gather(*tg._tasks)
+                except asyncio.CancelledError:
+                    tg._abort()
+
+                logging.debug('Shutting down now')
+
+            await self.programend()
+
+        time.sleep(0.1)
+        logging.info('stopped')
         os._exit(0)
 
-    def programend(self):
+    async def programend(self):
         logging.info('stopping')
 
-        self.mqttclient.publish(self.availability_topic, payload='{"state": "offline"}', qos=1, retain=True)
+        await self.mqttclient.publish(self.availability_topic, payload='{"state": "offline"}', qos=1, retain=True)
         for lock in self.locks:
-            self.mqtt_broadcast_lock_availability(lock, '')
+            await self.mqtt_broadcast_lock_availability(lock, '')
 
-        self.api_unsubscribe()
+        await self.api_unsubscribe()
 
-        time.sleep(0.5)
-        self.mqttclient.disconnect()
-        logging.info('stopped')
+    async def mqtt_on_connect(self):
+        logging.info('MQTT client connected')
 
-    def mqtt_on_connect(self, client, userdata, flags, rc):
-        logging.info('MQTT client connected with result code '+str(rc))
+        await self.mqttclient.publish(self.availability_topic, payload='{"state": "online"}', qos=1, retain=True)
 
-        self.mqttclient.publish(self.availability_topic, payload='{"state": "online"}', qos=1, retain=True)
-        self.mqttclient.will_set(self.availability_topic, payload='{"state": "offline"}', qos=1, retain=True)
-
-        self.mqttclient.subscribe(self.api_code_topic, 1)
+        await self.mqttclient.subscribe(self.api_code_topic, 1)
+        await self.mqttclient.subscribe('test', 1)
 
         for lock in self.locks:
             #Subscribe to MQTT lock updates
-            self.mqttclient.subscribe(lock['mqtt_set_state_topic'], 1)
-            self.mqttclient.subscribe(lock['mqtt_get_state_topic'], 1)
+            await self.mqttclient.subscribe(lock['mqtt_set_state_topic'], 1)
+            await self.mqttclient.subscribe(lock['mqtt_get_state_topic'], 1)
 
-        self.yale_authenticate()
+        await self.yale_authenticate()
 
-    def mqtt_on_message(self, client, userdata, msg):
-        try:
+    async def mqtt_listen(self):
+        logging.debug('Listening for MQTT messages')
+        async for msg in self.mqttclient.messages:
+            logging.debug('Received MQTT message')
             payload_as_string = msg.payload.decode('utf-8')
-            logging.debug('Received MQTT message on topic: ' + msg.topic + ', payload: ' + payload_as_string + ', retained: ' + str(msg.retain))
+            try:
+                logging.debug('Received MQTT message on topic: ' + str(msg.topic) + ', payload: ' + msg.payload.decode('utf-8') + ', retained: ' + str(msg.retain))
 
-            if str(msg.topic) == self.api_code_topic:
-                self.apply_validation_code(int(payload_as_string))
-            else:
-                try:
-                    lock = self.mqtt_topic_map[str(msg.topic)]
-                    if msg.topic.endswith('/get'):
-                        self.update_lock_state(lock)
-                    else:
-                        self.set_lock_state(lock, payload_as_string)
-                except KeyError:
-                    logging.error('Unknown command topic: '+msg.topic)
+                if str(msg.topic) == self.api_code_topic:
+                    await self.apply_validation_code(int(payload_as_string))
+                else:
+                    try:
+                        lock = self.mqtt_topic_map[str(msg.topic)]
+                        if str(msg.topic).endswith('/get'):
+                            await self.update_lock_state(lock)
+                        else:
+                            await self.set_lock_state(lock, payload_as_string)
+                    except KeyError:
+                        logging.error('Unknown command topic: '+str(msg.topic))
 
-        except Exception as e:
-            logging.exception(f'Encountered error when processing {msg.topic} with payload "{payload_as_string}": '+str(e))
+            except Exception as e:
+                logging.exception(f'Encountered error when processing {str(msg.topic)} with payload "{payload_as_string}": '+str(e))
 
-    def set_lock_state(self, lock, cmd):
+    async def set_lock_state(self, lock, cmd):
         cmd_upper = cmd.upper()
         if cmd_upper == CMD_LOCK:
-            cmd_func = self.yale_api.lock
+            cmd_func = self.yale_api.async_lock
 
         elif cmd_upper == CMD_UNLOCK:
-            cmd_func = self.yale_api.unlock
+            cmd_func = self.yale_api.async_unlock
 
         elif cmd_upper == '':
             cmd_func = None
@@ -410,14 +435,14 @@ class MqttYale():
         logging.info(f'Received "{cmd}" command from MQTT for {lock["name"]}')
         if cmd_func:
             try:
-                cmd_func(self.yale_authentication.access_token, lock['device_id'])
+                await cmd_func(self.yale_authentication.access_token, lock['device_id'])
             except AugustApiHTTPError as e:
                 logging.error(f'Failed to {cmd} {lock["name"]} due to error: {e}')
 
-        self.update_lock_state(lock)
+        await self.update_lock_state(lock)
 
-    def update_lock_state(self, lock):
-        state = self.yale_api.get_lock_status(self.yale_authentication.access_token, lock['device_id'], True)
+    async def update_lock_state(self, lock):
+        state = await self.yale_api.async_get_lock_status(self.yale_authentication.access_token, lock['device_id'], True)
 
         payload = json.dumps({
             'state': state[0].value.upper(),
@@ -426,17 +451,17 @@ class MqttYale():
 
         if lock['last_status'] != payload:
             lock['last_status'] = payload
-            self.mqttclient.publish(lock['mqtt_state_topic'], payload, 1)        
+            await self.mqttclient.publish(lock['mqtt_state_topic'], payload, 1)
 
-    def mqtt_broadcast_lock_availability(self, lock, value):
-       logging.debug('Broadcasting MQTT message on topic: ' + lock['mqtt_availability_topic'] + ', value: ' + value)
-       self.mqttclient.publish(lock['mqtt_availability_topic'], payload=value, qos=1, retain=True)
+    async def mqtt_broadcast_lock_availability(self, lock, value):
+        logging.debug('Broadcasting MQTT message on topic: ' + lock['mqtt_availability_topic'] + ', value: ' + value)
+        await self.mqttclient.publish(lock['mqtt_availability_topic'], payload=value, qos=1, retain=True)
 
-    def mqtt_broadcast_state(self, lock):
+    async def mqtt_broadcast_state(self, lock):
         topic = lock['mqtt_state_topic']
         state = json.dumps(lock['control'].get_state())
         logging.debug('Broadcasting MQTT message on topic: ' + topic + ', value: ' + state)
-        self.mqttclient.publish(topic, payload=state, qos=1, retain=True)
+        await self.mqttclient.publish(topic, payload=state, qos=1, retain=True)
 
 if __name__ == '__main__':
     mqttYale =  MqttYale()

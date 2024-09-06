@@ -1,9 +1,10 @@
 """Consume the august activity stream."""
 import logging
+import asyncio
+from aiolimiter import AsyncLimiter
 
 from aiohttp import ClientError
-
-from debounce import debounce
+from yalexs.exceptions import AugustApiAIOHTTPError as AugustApiHTTPError
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -22,15 +23,19 @@ class ActivityStream():
         self._last_update_time = last_update_time
         self._on_device_update = on_device_update
         self._auth = auth
+        self.invalid_api_token = False
+        self._update_activities_limiter = AsyncLimiter(5, 10)
 
-    def _refresh(self, time):
+    async def _refresh(self, time):
         """Update the activity stream from August."""
-        # This is the only place we refresh the api token
-        self._api.refresh_access_token_if_needed()
-        self._update_activities(time)
+        with self._update_activities_limiter:
+            await self._update_activities(time)
 
-    @debounce(1)
-    def _update_activities(self):
+            # This is the only place we refresh the api token
+            if self.authenticator.should_refresh():
+                self._api.refresh_access_token()
+
+    async def _update_activities(self):
         """Update device activities for a house."""
         _LOGGER.debug("Start retrieving device activities")
 
@@ -38,7 +43,7 @@ class ActivityStream():
 
         _LOGGER.debug("Updating device activity for house id %s", self._house_id)
         try:
-            activities = self._api.get_house_activities(
+            activities = await self._api.async_get_house_activities(
                 self._auth.access_token, self._house_id, limit=limit
             )
         except ClientError as ex:
@@ -48,6 +53,14 @@ class ActivityStream():
                 ex,
             )
             # Make sure we process the next house if one of them fails
+            return
+        except AugustApiHTTPError as ex:
+            self.invalid_api_token = True
+            _LOGGER.error(
+                "HTTP error trying to retrieve activity for house id %s: %s",
+                self._house_id,
+                ex,
+            )
             return
 
         _LOGGER.debug(
@@ -65,9 +78,10 @@ class ActivityStream():
                 device_id,
             )
 
-    def process_newer_device_activities(self, activities):
+    async def process_newer_device_activities(self, activities):
         """Process activities if they are newer than the last one."""
         updated_device_ids = set()
+        new_activities = []
         for activity in activities[::-1]:
             device_id = activity.device_id
             lastest_activity = self._latest_activities.get(device_id)
@@ -87,7 +101,7 @@ class ActivityStream():
 
             if self._on_device_update:
                 try:
-                    self._on_device_update(activity)
+                    await self._on_device_update(activity)
                 except Exception as e:  # pylint: disable=broad-except
                     _LOGGER.exception('Error calling on_device_update for new activity: %s', e)
 
