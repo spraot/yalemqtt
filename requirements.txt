@@ -1,4 +1,4 @@
 aiomqtt==2.3.0
 PyYAML==6.0.1
-yalexs==8.6.3
+yalexs==8.6.4
 aiolimiter==1.1.0
