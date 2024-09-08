@@ -26,10 +26,10 @@ class ActivityStream():
         self.invalid_api_token = False
         self._update_activities_limiter = AsyncLimiter(5, 10)
 
-    async def _refresh(self, time):
+    async def _refresh(self):
         """Update the activity stream from August."""
         with self._update_activities_limiter:
-            await self._update_activities(time)
+            await self._update_activities()
 
             # This is the only place we refresh the api token
             if self.authenticator.should_refresh():

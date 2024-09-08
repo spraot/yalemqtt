@@ -241,7 +241,9 @@ class MqttYale():
         for lock in self.locks:
             logging.debug('registering lock '+lock['details'].pubsub_channel)
             pubnub.register_device(lock['details'])
-        self._api_unsub_func1 = pubnub.subscribe(self.on_api_message)
+
+        loop = asyncio.get_event_loop()
+        self._api_unsub_func1 = pubnub.subscribe(lambda *args: loop.call_soon_threadsafe(asyncio.create_task, self.on_api_message(*args)))
         self._api_unsub_func2 = async_create_pubnub(self.api_user['UserID'], pubnub, Brand.YALE_HOME)
 
     async def on_api_message(self, device_id, date_time, message):
