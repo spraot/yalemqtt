@@ -326,11 +326,11 @@ class MqttYale():
     async def mainloop(self):
         logging.debug('mainloop')
         while not self.killer.kill_now.is_set():
-            try:
-                if self.yale_authentication.state == AuthenticationState.AUTHENTICATED and not self._api_unsub_func1:
-                    await self.api_subscribe()
-            except AttributeError:
-                pass
+            # try:
+            #     if self.yale_authentication.state == AuthenticationState.AUTHENTICATED and not self._api_unsub_func1:
+            #         await self.api_subscribe()
+            # except AttributeError:
+            #     pass
 
             try:
                 await asyncio.wait_for(self.killer.kill_now.wait(), timeout=1)
