@@ -145,15 +145,15 @@ class MqttYale():
             pass
 
         logging.info('Authenticating with Yale API')
-        if 'username' in self.yale and 'password' in self.yale:
-            logging.debug('API credentials found')
+        if not ('username' in self.yale and 'password' in self.yale):
+            logging.error('API credentials not found')
 
         self.yale_api = Api(timeout=20, brand=Brand.YALE_HOME, aiohttp_session=self.http_session)
         try:
             self.yale_api.brand_config.api_key = self.yale['api_key']
         except KeyError:
             pass
-        self.yale_authenticator = Authenticator(self.yale_api, **self.yale)
+        self.yale_authenticator = Authenticator(self.yale_api, self.yale['login_method'], self.yale['username'], self.yale['password'])
         await self.yale_authenticator.async_setup_authentication()
         self.yale_authentication = await self.yale_authenticator.async_authenticate()
 
