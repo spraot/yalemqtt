@@ -44,6 +44,7 @@ class MqttYale():
     mqtt_server_user = ''
     mqtt_server_password = ''
     seam_api_key = ''
+    webhook_secret = ''
     http_port = 8000
     http_host = '0.0.0.0'
 
@@ -87,13 +88,16 @@ class MqttYale():
 
             logging.info(f'Event received: {payload}')
             try:
-                wh = Webhook(secret)
+                wh = Webhook(self.webhook_secret)
                 msg = wh.verify(payload, headers)
                 logging.info(f'Event verified: {msg}')
             except WebhookVerificationError as e:
                 logging.error(f'Event verification failed: {e}')
                 response.status_code = status.HTTP_400_BAD_REQUEST
                 return
+
+            for lock in self.locks:
+                await self.update_lock_state(lock)
             return {"message": "Event received"}
 
     def get_lock_db(self):
@@ -122,7 +126,7 @@ class MqttYale():
         with open(self.config_file, 'r') as f:
             config = yaml.safe_load(f)
 
-        for key in ['topic_prefix', 'homeassistant_prefix', 'mqtt_server_ip', 'mqtt_server_port', 'mqtt_server_user', 'mqtt_server_password', 'seam_api_key', 'data_dir', 'database_file', 'http_port', 'http_host']:
+        for key in ['topic_prefix', 'homeassistant_prefix', 'mqtt_server_ip', 'mqtt_server_port', 'mqtt_server_user', 'mqtt_server_password', 'seam_api_key', 'webhook_secret', 'data_dir', 'database_file', 'http_port', 'http_host']:
             try:
                 self.__setattr__(key, config[key])
             except KeyError:
