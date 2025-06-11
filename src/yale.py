@@ -13,7 +13,7 @@ import logging
 from seam import Seam
 from fastapi import FastAPI, Request, Response
 import uvicorn
-from svix.webhooks import Webhook
+from svix.webhooks import Webhook, WebhookVerificationError
 
 CMD_LOCK = 'LOCK'
 CMD_UNLOCK = 'UNLOCK'
