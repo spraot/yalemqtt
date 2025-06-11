@@ -82,7 +82,7 @@ class MqttYale():
     def _setup_routes(self):
         """Setup FastAPI routes"""
         
-        @self.app.get("/event")
+        @self.app.post("/event")
         async def event(request: Request, response: Response):
             headers = request.headers
             payload = await request.body()
