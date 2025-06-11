@@ -14,6 +14,7 @@ from seam import Seam
 from fastapi import FastAPI, Request, Response
 import uvicorn
 from svix.webhooks import Webhook, WebhookVerificationError
+from http import HTTPStatus
 
 CMD_LOCK = 'LOCK'
 CMD_UNLOCK = 'UNLOCK'
@@ -93,7 +94,7 @@ class MqttYale():
                 logging.info(f'Event verified: {msg}')
             except WebhookVerificationError as e:
                 logging.error(f'Event verification failed: {e}')
-                response.status_code = status.HTTP_400_BAD_REQUEST
+                response.status_code = HTTPStatus.BAD_REQUEST
                 return
 
             for lock in self.locks:
