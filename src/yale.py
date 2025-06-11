@@ -1,27 +1,19 @@
 #!/usr/bin/env python3
 
-from datetime import datetime
 import os
 import re
 import sys
 import json
 import asyncio
-from aiohttp import ClientSession
-import aiohttp
 import yaml
 from aiomqtt import Client as MqttClient, Will
 import time
 from signal import signal, SIGINT, SIGTERM
 import logging
-from yalexs.activity import ActivityType
-from yalexs.api_async import ApiAsync as Api
-from yalexs.authenticator_async import AuthenticatorAsync as Authenticator, AuthenticationState
-from yalexs.authenticator_common import ValidationResult
-from yalexs.exceptions import AugustApiAIOHTTPError as AugustApiHTTPError
-from activity import ActivityStream
-from pubnub_async import AugustPubNub, async_create_pubnub
-from yalexs.pubnub_activity import activities_from_pubnub_message
-from yalexs.const import Brand
+from seam import Seam
+from fastapi import FastAPI, Request, Response
+import uvicorn
+from svix.webhooks import Webhook
 
 CMD_LOCK = 'LOCK'
 CMD_UNLOCK = 'UNLOCK'
@@ -51,15 +43,17 @@ class MqttYale():
     mqtt_server_port = 1883
     mqtt_server_user = ''
     mqtt_server_password = ''
+    seam_api_key = ''
+    http_port = 8000
+    http_host = '0.0.0.0'
 
     mqtt_topic_map = {}
     locks = []
     _lock_by_id = {}
-
-    _api_unsub_func1 = None
-    _api_unsub_func2 = None
+    _lock_by_name = {}
 
     http_session = None
+    app = None
 
     def __init__(self):
         logging.basicConfig(level=os.environ.get('LOGLEVEL', 'INFO'), format='%(asctime)s;<%(levelname)s>;%(message)s')
@@ -72,14 +66,35 @@ class MqttYale():
 
         self.load_config()
 
+        self.seam = Seam(api_key=self.seam_api_key)
+
+        # Initialize FastAPI app
+        self.app = FastAPI(title="Yale MQTT Bridge API", version="1.0.0")
+        self._setup_routes()
+
          #Register program end event
         # atexit.register(self.programend)
 
         logging.info('init done')
 
-    async def init_aiohttp_client(self):
-        async with aiohttp.ClientSession() as session:
-            pass
+    def _setup_routes(self):
+        """Setup FastAPI routes"""
+        
+        @self.app.get("/event")
+        async def event(request: Request, response: Response):
+            headers = request.headers
+            payload = await request.body()
+
+            logging.info(f'Event received: {payload}')
+            try:
+                wh = Webhook(secret)
+                msg = wh.verify(payload, headers)
+                logging.info(f'Event verified: {msg}')
+            except WebhookVerificationError as e:
+                logging.error(f'Event verification failed: {e}')
+                response.status_code = status.HTTP_400_BAD_REQUEST
+                return
+            return {"message": "Event received"}
 
     def get_lock_db(self):
         try:
@@ -107,83 +122,21 @@ class MqttYale():
         with open(self.config_file, 'r') as f:
             config = yaml.safe_load(f)
 
-        for key in ['topic_prefix', 'homeassistant_prefix', 'mqtt_server_ip', 'mqtt_server_port', 'mqtt_server_user', 'mqtt_server_password', 'yale', 'data_dir', 'database_file']:
+        for key in ['topic_prefix', 'homeassistant_prefix', 'mqtt_server_ip', 'mqtt_server_port', 'mqtt_server_user', 'mqtt_server_password', 'seam_api_key', 'data_dir', 'database_file', 'http_port', 'http_host']:
             try:
                 self.__setattr__(key, config[key])
             except KeyError:
                 if key == 'database_file':
                     self.database_file = os.path.join(self.data_dir, 'database.json')
 
-        # TODO fail if necessary yale auth info is missing
-
-        self.yale.setdefault('access_token_cache_file', os.path.join(self.data_dir, 'access_cache.json'))
-        self.yale.setdefault('login_method', 'email')
+        if not self.seam_api_key:
+            raise ValueError('seam_api_key is required')
 
         self.availability_topic = self.topic_prefix + '/bridge/state'
         self.api_state_topic = self.topic_prefix + '/bridge/api'
-        self.api_code_topic = self.api_state_topic + '/code'
-
-    async def update_api_state(self):
-        state = {'state': self.yale_authentication.state.value}
-
-        if self.yale_authentication.state == AuthenticationState.REQUIRES_VALIDATION:
-            state['validation_code_topic'] = self.api_code_topic
-
-        await self.mqttclient.publish(self.api_state_topic, payload=json.dumps(state), qos=1, retain=True)
-
-        if self.yale_authentication.state == AuthenticationState.AUTHENTICATED:
-            await self.get_locks()
-
-    async def yale_authenticate(self):
-        if not self.http_session:
-            self.http_session = ClientSession()
-        try:
-            if self.yale_authentication.state == AuthenticationState.AUTHENTICATED:
-                return
-            logging.info('Already authenticated, skipping authentication process')
-        except AttributeError:
-            pass
-
-        logging.info('Authenticating with Yale API')
-        if not ('username' in self.yale and 'password' in self.yale):
-            logging.error('API credentials not found')
-
-        self.yale_api = Api(timeout=20, brand=Brand.YALE_HOME, aiohttp_session=self.http_session)
-        try:
-            self.yale_api.brand_config.api_key = self.yale['api_key']
-        except KeyError:
-            pass
-        self.yale_authenticator = Authenticator(self.yale_api, self.yale['login_method'], self.yale['username'], self.yale['password'])
-        await self.yale_authenticator.async_setup_authentication()
-        self.yale_authentication = await self.yale_authenticator.async_authenticate()
-
-        logging.info('Authentication state: '+self.yale_authentication.state.value)
-
-        if self.yale_authentication.state == AuthenticationState.REQUIRES_VALIDATION:
-            await self.yale_authenticator.async_send_verification_code()
-            logging.warning('Validation needed to log in, waiting for code at '+self.api_code_topic)
-        elif self.yale_authentication.state == AuthenticationState.BAD_PASSWORD:
-            logging.warning('Authentication failed: invalid credentials')
-
-        await self.update_api_state()
-
-    async def apply_validation_code(self, code):
-        if self.yale_authentication == AuthenticationState.AUTHENTICATED:
-            # skipping
-            return
-        
-        validation_result = await self.yale_authenticator.async_validate_verification_code(code)
-        if validation_result == ValidationResult.VALIDATED:
-            logging.info('Code validation successful')
-            self.yale_authentication = await self.yale_authenticator.async_authenticate()
-        else:
-            logging.error('Code validation unsuccessful, try new code or restart service to start over')
-
-        await self.update_api_state()
 
     async def get_locks(self):
-        self.api_user = await self.yale_api.async_get_user(self.yale_authentication.access_token)
-        locks = await self.yale_api.async_get_locks(self.yale_authentication.access_token)
+        locks = self.seam.locks.list()
         logging.info(f'Found {len(locks)} locks')
 
         old_locks = self.locks
@@ -191,19 +144,19 @@ class MqttYale():
         self._lock_by_id = {}
 
         for lock in locks:
-            id = re.sub('[^\w-]', '_', lock.device_name.lower().replace(' ', '_'))
+            logging.debug(f'Lock: {lock}')
+            id = re.sub('[^\w-]', '_', lock.display_name.lower().replace(' ', '_'))
             self.locks.append({
                 'id': id,
                 'device_id': lock.device_id,
-                'name': lock.device_name,
-                'house_id': lock.house_id,
+                'name': lock.nickname,
                 'mqtt_config_topic': '{}/lock/{}/config'.format(self.homeassistant_prefix, id),
                 'mqtt_set_state_topic': '{}/{}/set'.format(self.topic_prefix, id),
                 'mqtt_get_state_topic': '{}/{}/get'.format(self.topic_prefix, id),
                 'mqtt_state_topic': '{}/{}'.format(self.topic_prefix, id),
                 'mqtt_activity_topic': '{}/{}/activity'.format(self.topic_prefix, id),
                 'mqtt_availability_topic': '{}/{}/availability'.format(self.topic_prefix, id),
-                'details': await self.yale_api.async_get_lock_detail(self.yale_authentication.access_token, lock.device_id),
+                'details': lock,
                 'last_status': ''
             })
 
@@ -223,7 +176,6 @@ class MqttYale():
             await self.configure_mqtt_for_lock(lock)
 
             #Broadcast current lock state to MQTT for locks
-            await self.mqtt_broadcast_lock_availability(lock, '{"state": "online"}')
             await self.update_lock_state(lock)
 
             #Subscribe to MQTT lock updates
@@ -237,21 +189,6 @@ class MqttYale():
                 await self.mqttclient.publish(lock['mqtt_config_topic'], '', 1, True)
         self.save_lock_db()
 
-        self._activity_log = ActivityStream(self.yale_api, self.yale_authentication, self.locks[0]['house_id'], self.on_new_activity, last_update_time=datetime.now())
-
-    async def api_subscribe(self):
-        """Subscribe to pubnub messages."""
-        await self.api_unsubscribe()
-        logging.info('Subscribing to lock events')
-        pubnub = AugustPubNub()
-        for lock in self.locks:
-            logging.debug('registering lock '+lock['details'].pubsub_channel)
-            pubnub.register_device(lock['details'])
-
-        loop = asyncio.get_event_loop()
-        self._api_unsub_func1 = pubnub.subscribe(lambda *args: loop.call_soon_threadsafe(asyncio.create_task, self.on_api_message(*args)))
-        self._api_unsub_func2 = async_create_pubnub(self.api_user['UserID'], pubnub, Brand.YALE_HOME)
-
     async def on_api_message(self, device_id, date_time, message):
         """Process a pubnub message."""
         logging.debug('Received lock events')
@@ -259,9 +196,6 @@ class MqttYale():
         activities = activities_from_pubnub_message(lock['details'], date_time, message)
         for act in activities:
             logging.debug(f'Lock event: {repr(act)}')
-        self._activity_log._refresh()
-        if self._activity_log.invalid_api_token:
-            self.killer.exit_gracefully()
         await self.update_lock_state(lock)
 
     async def on_new_activity(self, activity):
@@ -280,21 +214,6 @@ class MqttYale():
 
         await self.mqttclient.publish(lock['mqtt_activity_topic'], json.dumps(payload), 1)   
 
-    async def api_unsubscribe(self):
-        """Stop the subscriptions."""
-
-        if self._api_unsub_func1:
-            logging.info('Unsubscribing from lock events (1)')
-            self._api_unsub_func1()
-            self._api_unsub_func1 = None
-
-        if self._api_unsub_func2:
-            logging.info('Unsubscribing from lock events (2)')
-            self._api_unsub_func2()
-            self._api_unsub_func2 = None
-
-        logging.debug('Done unsubscribing')
-
     async def configure_mqtt_for_lock(self, lock):
         lock_configuration = {
             'name': lock['name'],
@@ -306,13 +225,13 @@ class MqttYale():
             "state_topic": lock['mqtt_state_topic'],
             "value_template": '{{ value_jason.state }}',
             "device": {
-                "identifiers": [lock['device_id'], lock['details'].serial_number, lock['details'].mac_address],
-                "manufacturer": "Yale",
+                "identifiers": [lock['device_id']],
+                "manufacturer": lock['details'].properties['manufacturer'],
                 "model": "Yale Doorman",
-                "hw_version": lock['details'].model,
+                # "hw_version": lock['details'].model,
                 "name": lock['name'],
-                "sw_version": lock['details'].firmware_version,
-                "via_device": lock['details'].bridge.device_id
+                # "sw_version": lock['details'].firmware_version,
+                # "via_device": lock['details'].bridge.device_id
             },
             "unique_id": lock["device_id"]
         }
@@ -331,23 +250,23 @@ class MqttYale():
 
     async def mainloop(self):
         logging.debug('mainloop')
-        while not self.killer.kill_now.is_set():
-            # try:
-            #     if self.yale_authentication.state == AuthenticationState.AUTHENTICATED and not self._api_unsub_func1:
-            #         await self.api_subscribe()
-            # except AttributeError:
-            #     pass
 
+        await self.get_locks()
+        while not self.killer.kill_now.is_set():
             try:
                 await asyncio.wait_for(self.killer.kill_now.wait(), timeout=1)
             except asyncio.TimeoutError:
                 pass
-            # self.killer.kill_now.wait(1)
         raise asyncio.CancelledError()
 
     async def main(self):
         logging.debug('main')
 
+        # Start HTTP server
+        logging.info(f'Starting HTTP server on {self.http_host}:{self.http_port}')
+        http_config = uvicorn.Config(self.app, host=self.http_host, port=self.http_port, log_level=os.environ.get('LOGLEVEL', 'INFO').lower())
+        http_server = uvicorn.Server(http_config)
+        
         #MQTT startup
         logging.info('Starting MQTT client')
         async with MqttClient(self.mqtt_server_ip, self.mqtt_server_port, username=self.mqtt_server_user, password=self.mqtt_server_password,
@@ -360,6 +279,7 @@ class MqttYale():
             async with asyncio.TaskGroup() as tg:
                 main_loop = tg.create_task(self.mainloop())
                 mqtt_listener = tg.create_task(self.mqtt_listen())
+                http_server_task = tg.create_task(http_server.serve())
 
                 for sig in [SIGINT, SIGTERM]:
                     asyncio.get_event_loop().add_signal_handler(sig, tg._abort)
@@ -385,22 +305,17 @@ class MqttYale():
         for lock in self.locks:
             await self.mqtt_broadcast_lock_availability(lock, '')
 
-        await self.api_unsubscribe()
-
     async def mqtt_on_connect(self):
         logging.info('MQTT client connected')
 
         await self.mqttclient.publish(self.availability_topic, payload='{"state": "online"}', qos=1, retain=True)
 
-        await self.mqttclient.subscribe(self.api_code_topic, 1)
         await self.mqttclient.subscribe('test', 1)
 
         for lock in self.locks:
             #Subscribe to MQTT lock updates
             await self.mqttclient.subscribe(lock['mqtt_set_state_topic'], 1)
             await self.mqttclient.subscribe(lock['mqtt_get_state_topic'], 1)
-
-        await self.yale_authenticate()
 
     async def mqtt_listen(self):
         logging.debug('Listening for MQTT messages')
@@ -410,17 +325,14 @@ class MqttYale():
             try:
                 logging.debug('Received MQTT message on topic: ' + str(msg.topic) + ', payload: ' + msg.payload.decode('utf-8') + ', retained: ' + str(msg.retain))
 
-                if str(msg.topic) == self.api_code_topic:
-                    await self.apply_validation_code(int(payload_as_string))
-                else:
-                    try:
-                        lock = self.mqtt_topic_map[str(msg.topic)]
-                        if str(msg.topic).endswith('/get'):
-                            await self.update_lock_state(lock)
-                        else:
-                            await self.set_lock_state(lock, payload_as_string)
-                    except KeyError:
-                        logging.error('Unknown command topic: '+str(msg.topic))
+                try:
+                    lock = self.mqtt_topic_map[str(msg.topic)]
+                    if str(msg.topic).endswith('/get'):
+                        await self.update_lock_state(lock)
+                    else:
+                        await self.set_lock_state(lock, payload_as_string)
+                except KeyError:
+                    logging.error('Unknown command topic: '+str(msg.topic))
 
             except Exception as e:
                 logging.exception(f'Encountered error when processing {str(msg.topic)} with payload "{payload_as_string}": '+str(e))
@@ -428,10 +340,10 @@ class MqttYale():
     async def set_lock_state(self, lock, cmd):
         cmd_upper = cmd.upper()
         if cmd_upper == CMD_LOCK:
-            cmd_func = self.yale_api.async_lock
+            cmd_func = self.seam.locks.lock_door
 
         elif cmd_upper == CMD_UNLOCK:
-            cmd_func = self.yale_api.async_unlock
+            cmd_func = self.seam.locks.unlock_door
 
         elif cmd_upper == '':
             cmd_func = None
@@ -443,23 +355,26 @@ class MqttYale():
         logging.info(f'Received "{cmd}" command from MQTT for {lock["name"]}')
         if cmd_func:
             try:
-                await cmd_func(self.yale_authentication.access_token, lock['device_id'])
-            except AugustApiHTTPError as e:
+                await cmd_func(device_id=lock['device_id'])
+            except Exception as e:
                 logging.error(f'Failed to {cmd} {lock["name"]} due to error: {e}')
 
         await self.update_lock_state(lock)
 
     async def update_lock_state(self, lock):
-        state = await self.yale_api.async_get_lock_status(self.yale_authentication.access_token, lock['device_id'], True)
+        new_lock = self.seam.locks.get(device_id=lock['device_id'])
 
         payload = json.dumps({
-            'state': state[0].value.upper(),
-            'doorState': state[1].value.upper()
+            'state': 'locked' if new_lock.properties["locked"] else 'unlocked',
+            'doorState': 'open' if new_lock.properties["door_open"] else 'closed',
+            'battery': new_lock.properties["battery_level"]
         })
 
         if lock['last_status'] != payload:
             lock['last_status'] = payload
             await self.mqttclient.publish(lock['mqtt_state_topic'], payload, 1)
+
+        await self.mqtt_broadcast_lock_availability(lock, '{"state": "' + ('online' if lock['details'].properties['online'] else 'offline') + '"}')
 
     async def mqtt_broadcast_lock_availability(self, lock, value):
         logging.debug('Broadcasting MQTT message on topic: ' + lock['mqtt_availability_topic'] + ', value: ' + value)
@@ -470,6 +385,7 @@ class MqttYale():
         state = json.dumps(lock['control'].get_state())
         logging.debug('Broadcasting MQTT message on topic: ' + topic + ', value: ' + state)
         await self.mqttclient.publish(topic, payload=state, qos=1, retain=True)
+
 
 if __name__ == '__main__':
     mqttYale =  MqttYale()

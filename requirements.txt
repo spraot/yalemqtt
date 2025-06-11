@@ -1,4 +1,5 @@
 aiomqtt==2.3.0
 PyYAML==6.0.1
-yalexs==8.6.4
-aiolimiter==1.1.0
+seam==1.92.0
+fastapi==0.115.12
+uvicorn==0.34.3
