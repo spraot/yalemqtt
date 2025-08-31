@@ -68,7 +68,13 @@ class MqttYale():
 
         self.load_config()
 
-        self.seam = Seam(api_key=self.seam_api_key)
+        self.seam = Seam(
+            api_key=self.seam_api_key,
+            wait_for_action_attempt={
+                "timeout": 30.0,  # Increase timeout to 30 seconds
+                "polling_interval": 1.0
+            }
+        )
 
         # Initialize FastAPI app
         self.app = FastAPI(title="Yale MQTT Bridge API", version="1.0.0")
@@ -141,7 +147,7 @@ class MqttYale():
         self.api_state_topic = self.topic_prefix + '/bridge/api'
 
     async def get_locks(self):
-        locks = self.seam.locks.list()
+        locks = await asyncio.to_thread(self.seam.locks.list)
         logging.info(f'Found {len(locks)} locks')
 
         old_locks = self.locks
@@ -154,11 +160,12 @@ class MqttYale():
             self.locks.append({
                 'id': id,
                 'device_id': lock.device_id,
-                'name': lock.nickname,
+                'name': lock.nickname if lock.nickname else lock.display_name,
                 'mqtt_config_topic': '{}/lock/{}/config'.format(self.homeassistant_prefix, id),
                 'mqtt_set_state_topic': '{}/{}/set'.format(self.topic_prefix, id),
                 'mqtt_get_state_topic': '{}/{}/get'.format(self.topic_prefix, id),
                 'mqtt_state_topic': '{}/{}'.format(self.topic_prefix, id),
+                'mqtt_error_topic': '{}/{}/error'.format(self.topic_prefix, id),
                 'mqtt_activity_topic': '{}/{}/activity'.format(self.topic_prefix, id),
                 'mqtt_availability_topic': '{}/{}/availability'.format(self.topic_prefix, id),
                 'details': lock,
@@ -360,14 +367,18 @@ class MqttYale():
         logging.info(f'Received "{cmd}" command from MQTT for {lock["name"]}')
         if cmd_func:
             try:
-                await cmd_func(device_id=lock['device_id'])
+                await asyncio.to_thread(cmd_func, device_id=lock['device_id'])
             except Exception as e:
-                logging.error(f'Failed to {cmd} {lock["name"]} due to error: {e}')
+                await self.handle_lock_error(lock, f'Failed to {cmd} {lock["name"]} due to error: {e}')
 
         await self.update_lock_state(lock)
 
+    async def handle_lock_error(self, lock, error):
+        logging.error(error)
+        await self.mqttclient.publish(lock['mqtt_error_topic'], payload=json.dumps({'message': error}), qos=1)
+
     async def update_lock_state(self, lock):
-        new_lock = self.seam.locks.get(device_id=lock['device_id'])
+        new_lock = await asyncio.to_thread(self.seam.locks.get, device_id=lock['device_id'])
 
         payload = json.dumps({
             'state': 'locked' if new_lock.properties["locked"] else 'unlocked',
