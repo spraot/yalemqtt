@@ -15,6 +15,7 @@ from fastapi import FastAPI, Request, Response
 import uvicorn
 from svix.webhooks import Webhook, WebhookVerificationError
 from http import HTTPStatus
+from urllib3.util.retry import Retry
 
 CMD_LOCK = 'LOCK'
 CMD_UNLOCK = 'UNLOCK'
@@ -71,9 +72,10 @@ class MqttYale():
         self.seam = Seam(
             api_key=self.seam_api_key,
             wait_for_action_attempt={
-                "timeout": 30.0,  # Increase timeout to 30 seconds
+                "timeout": 60.0,  # Increase timeout to 30 seconds
                 "polling_interval": 1.0
-            }
+            },
+            retries=Retry(total=5, backoff_factor=2)
         )
 
         # Initialize FastAPI app
