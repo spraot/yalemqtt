@@ -367,11 +367,19 @@ class MqttYale():
             return
         
         logging.info(f'Received "{cmd}" command from MQTT for {lock["name"]}')
+        tries_left = 3
         if cmd_func:
-            try:
-                await asyncio.to_thread(cmd_func, device_id=lock['device_id'])
-            except Exception as e:
-                await self.handle_lock_error(lock, f'Failed to {cmd} {lock["name"]} due to error: {e}')
+            while tries_left > 0:
+                try:
+                    await asyncio.to_thread(cmd_func, device_id=lock['device_id'])
+                    break
+                except Exception as e:
+                    tries_left -= 1
+                    errMsg = f'Failed to {cmd} {lock["name"]} due to error: {e}'
+                    if tries_left > 0:
+                        logging.warning(errMsg + f' (will retry {tries_left} more times)')
+                    else:
+                        await self.handle_lock_error(lock, errMsg + ' (giving up)')
 
         await self.update_lock_state(lock)
 
